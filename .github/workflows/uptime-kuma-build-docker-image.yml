@@ -1,0 +1,141 @@
+name: uptime-kuma 构建并推送镜像
+
+on:
+  #  schedule:
+  #    - cron: '0 0 * * *' # 每天的凌晨 0:00 执行一次，即中国早上8点
+  workflow_dispatch: # 手动触发
+
+jobs:
+  Uptime-Kuma-Build-and-Push-Docker-Image:
+    name: 'Uptime Kuma 构建Docker 镜像'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 设置仓库
+        uses: actions/checkout@v4
+        with:
+          repository: louislam/uptime-kuma
+          path: uptime-kuma
+          fetch-depth: 0
+
+      - name: 检查 Docker Hub 最新镜像
+        id: check_docker_hub
+        run: |
+          cd uptime-kuma
+          CURRENT_SHA=$(git rev-parse --short HEAD)
+          # 获取 Docker Hub 上第二新的标签（通常是最新的非 latest 标签）
+          LATEST_TAG=$(curl -s "https://hub.docker.com/v2/repositories/${{ secrets.DOCKERHUB_USERNAME }}/uptime-kuma/tags/" | jq -r '.results[1].name')
+          if [[ $LATEST_TAG == *"$CURRENT_SHA"* ]]; then
+            echo "REPO_UPDATED=false" >> $GITHUB_ENV
+            echo "Docker Hub 已有最新 SHA 的镜像。无需更新。"
+          else
+            echo "REPO_UPDATED=true" >> $GITHUB_ENV
+            echo "检测到新的提交，需要构建新镜像"
+            LAST_COMMIT_MSG=$(git log -1 --pretty=format:"%s")
+            LAST_COMMIT_AUTHOR=$(git log -1 --pretty=format:"%an")
+            LAST_COMMIT_DATE=$(TZ='Asia/Shanghai' date -d "@$(git log -1 --format=%ct)" '+%Y-%m-%d %H:%M:%S')
+            echo "LAST_COMMIT_MSG=$LAST_COMMIT_MSG" >> $GITHUB_ENV
+            echo "LAST_COMMIT_AUTHOR=$LAST_COMMIT_AUTHOR" >> $GITHUB_ENV
+            echo "LAST_COMMIT_DATE=$LAST_COMMIT_DATE" >> $GITHUB_ENV
+          fi
+
+      - name: 设置 Docker Buildx
+        if: env.REPO_UPDATED == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 Docker Hub
+        if: env.REPO_UPDATED == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 创建 Dockerfile
+        if: env.REPO_UPDATED == 'true'
+        run: |
+          cat <<EOF > uptime-kuma/Dockerfile
+          # 前端构建阶段
+          FROM node:20-alpine as builder
+
+          WORKDIR /app
+          COPY package*.json ./
+          RUN npm install --legacy-peer-deps && npm cache clean --force
+          COPY . .
+          RUN npm run build
+          RUN npm prune --production
+
+          # 第二阶段：仅复制构建产物和运行时依赖
+          FROM node:20-alpine
+
+          WORKDIR /app
+          COPY --from=builder /app/dist ./dist
+          COPY --from=builder /app/server ./server
+          COPY --from=builder /app/node_modules ./node_modules
+          COPY --from=builder /app/package*.json ./
+          COPY --from=builder /app/src ./src
+          COPY --from=builder /app/db ./db
+
+          EXPOSE 3001
+          CMD ["node", "server/server.js"]
+          EOF
+
+      - name: 构建并上传镜像
+        if: env.REPO_UPDATED == 'true'
+        id: build_push
+        env:
+          IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/uptime-kuma
+        run: |
+          cd uptime-kuma
+          # 获取最新提交的SHA值和日期
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          COMMIT_DATE=$(git log -1 --format=%cs)
+          TAG="${COMMIT_DATE}-${COMMIT_SHA}"
+
+          echo "构建Docker镜像..."
+          docker build -t $IMAGE_NAME:$TAG -t $IMAGE_NAME:latest .
+
+          echo "推送Docker镜像到Docker Hub..."
+          docker push $IMAGE_NAME:$TAG
+          docker push $IMAGE_NAME:latest
+
+          # 将TAG保存到环境变量中,以便后续步骤使用
+          echo "IMAGE_TAG=$TAG" >> $GITHUB_ENV
+
+      - name: 获取当前时间
+        id: get_time
+        run: echo "CURRENT_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
+
+      - name: 发送 wpush 通知
+        uses: candies404/Multi-Channel-Notifier@latest
+        if: always()
+        with:
+          wpush_key: ${{ secrets.WPUSH_KEY }}
+          hitokoto: 'false'
+          title: ${{ steps.build_push.outcome == 'success' && 'uptime-kuma 镜像更新' || 'uptime-kuma 镜像未更新' }}
+          content: |
+            ${{
+              env.REPO_UPDATED == 'true' && steps.build_push.outcome == 'success' &&
+              format('
+              ### uptime-kuma镜像已成功更新并推送!
+              **时间**：{0}
+              **镜像地址：** https://hub.docker.com/r/{1}/uptime-kuma
+              **最新更新：**
+              - 提交信息：{2}
+              - 提交者：{3}
+              - 提交时间：{4}', env.CURRENT_TIME, secrets.DOCKERHUB_USERNAME, env.LAST_COMMIT_MSG, env.LAST_COMMIT_AUTHOR, env.LAST_COMMIT_DATE) ||
+              env.REPO_UPDATED == 'true' && steps.build_push.outcome != 'success' &&
+              format('
+              ### uptime-kuma镜像更新失败!
+              请尽快检查原因并解决。
+              **检查时间：** {0}
+              **最新提交信息：**
+              - 提交信息：{1}
+              - 提交者：{2}
+              - 提交时间：{3}', env.CURRENT_TIME, env.LAST_COMMIT_MSG, env.LAST_COMMIT_AUTHOR, env.LAST_COMMIT_DATE) ||
+              env.REPO_UPDATED != 'true' &&
+              format('
+              ### uptime-kuma仓库无新的更新
+              **检查时间：** {0}
+              **详细信息：** Docker Hub 已有最新提交的镜像，无需重新构建。', env.CURRENT_TIME
+              )
+            }}
