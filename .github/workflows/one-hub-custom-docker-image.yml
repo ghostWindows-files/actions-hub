@@ -6,101 +6,228 @@ on:
   workflow_dispatch:        # 支持手动触发
 
 jobs:
-  one-hub-custom:
-    name: '自定义前端 One Hub'
+  check-updates:
+    name: one-hub 更新检查
     runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.final_check.outputs.should_build }}
     continue-on-error: true
+    permissions:
+      issues: write
+    env:
+      TZ: Asia/Shanghai
+      RETRY_COUNT: 3  # API 重试次数
+      RETRY_DELAY: 2  # 重试基础等待时间（秒）
+
+    steps:
+      # ========== 数据获取 ==========
+      - name: 获取仓库快照
+        id: repo_snapshot
+        run: |
+          echo "=== 开始获取仓库快照 ==="
+          
+          # 获取 one-hub 仓库最新提交
+          echo "获取 one-hub 仓库最新提交..."
+          main_commit=$(curl -fsS "https://api.github.com/repos/MartialBE/one-hub/commits/main")
+          main_sha=$(jq -r '.sha[0:7]' <<< "$main_commit")
+          main_timestamp=$(jq -r '.commit.committer.date' <<< "$main_commit")
+          echo "one-hub 仓库 SHA: $main_sha (时间: $main_timestamp)"
+          
+          # 获取 TableRow 信息
+          echo "获取 TableRow 信息"
+          table_commit=$(curl -fsS "https://api.github.com/repos/MartialBE/one-hub/commits?path=web/src/views/Channel/component/TableRow.jsx&until=$main_timestamp")
+          table_sha=$(jq -r 'if length>0 then .[0].sha[0:7] else "null" end' <<< "$table_commit")
+          echo "TableRow SHA: $table_sha"
+          
+          # 存储环境变量
+          echo "存储环境变量..."
+          echo "MAIN_SHA=$main_sha" >> $GITHUB_ENV
+          echo "MAIN_TIMESTAMP=$main_timestamp" >> $GITHUB_ENV
+          echo "TABLE_SHA=$table_sha" >> $GITHUB_ENV
+          
+          echo "=== 仓库快照获取完成 ==="
+
+      
+      # ========== Issue 管理 ==========
+      - name: 管理追踪 Issue
+        id: issue_manager
+        env:
+          ISSUE_TITLE: "one-hub-tracker"
+        run: |
+          echo "=== 开始管理追踪 Issue ==="
+          
+          # 带重试的 Issue 查询
+          echo "查询现有 Issue..."
+          for i in {1..3}; do
+            issues=$(curl -fsS "https://api.github.com/repos/${{ github.repository }}/issues?state=open" |
+              jq --arg title "$ISSUE_TITLE" '[.[] | select(.title == $title)]')
+            if [ $(jq 'length' <<< "$issues") -gt 0 ]; then
+              echo "找到现有 Issue"
+              break
+            fi
+            echo "未找到 Issue，重试 $i/3..."
+            sleep $((i*2))
+          done
+                 
+          if [ $(jq 'length' <<< "$issues") -eq 0 ]; then
+            # 首次创建 Issue ======================
+            echo "构建 Issue 内容..."
+            issue_body=$(jq -n \
+              --arg main "${{ env.MAIN_SHA }}" \
+              --arg table "${{ env.TABLE_SHA }}" \
+              --arg ts "${{ env.MAIN_TIMESTAMP }}" \
+              '{
+                repo_sha: $main,
+                TableRow_file_sha: $table,
+                timestamp: $ts
+              }')
+            
+            echo "=== 创建新 Issue ==="
+            response=$(curl -fsS -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg title "$ISSUE_TITLE" --argjson body "$issue_body" '{title: $title, body: $body|tojson}')" \
+              "https://api.github.com/repos/${{ github.repository }}/issues")
+            echo "✅ 已创建 Issue: $(jq -r '.html_url' <<< "$response")"
+            echo "main_updated=true" >> $GITHUB_OUTPUT  # 首次创建时强制触发构建
+            echo "table_updated=false" >> $GITHUB_OUTPUT  # 首次创建不触发 TableRow 更新
+            echo "is_first_run=true" >> $GITHUB_OUTPUT  # 标记为首次运行
+            
+          else
+            # 存在现有 Issue ======================
+            issue_id=$(jq -r '.[0].number' <<< "$issues")
+            existing_body=$(jq -r '.[0].body' <<< "$issues")
+            echo "现有 Issue ID: $issue_id"
+            echo "现有 Issue 内容: $existing_body"
+        
+            # 解析现有 Issue 内容
+            existing_data=$(echo "$existing_body" | jq -R fromjson)
+            if [ $? -ne 0 ]; then
+              echo "::error::无法解析现有 Issue 内容"
+              exit 1
+            fi
+        
+            # 获取旧 SHA 值
+            old_main_sha=$(jq -r '.repo_sha' <<< "$existing_data")
+            current_main_sha="${{ env.MAIN_SHA }}"
+            old_table_sha=$(jq -r '.TableRow_file_sha' <<< "$existing_data")
+            current_table_sha="${{ env.TABLE_SHA }}"
+            echo "旧仓库 SHA: $old_main_sha"
+            echo "新仓库 SHA: $current_main_sha"
+            echo "旧 TableRow SHA: $old_table_sha"
+            echo "新 TableRow SHA: $current_table_sha"
+            
+            # 比较逻辑
+            main_updated=false
+            if [ "$current_main_sha" != "$old_main_sha" ]; then
+              echo "🔄 检测到 one-hub 仓库更新"
+              main_updated=true
+            else
+              echo "✅ one-hub 仓库未更新"
+            fi
+                      
+            # 比较 TableRow SHA
+            table_updated=false
+            if [ "$current_table_sha" != "$old_table_sha" ]; then
+              echo "🔄 检测到 TableRow 更新"
+              table_updated=true
+            else
+              echo "✅ TableRow 未更新, 不发送通知"
+            fi
+            
+            # 仅在需要时更新 Issue
+            if [ "$main_updated" == "true" ]; then
+              # 更新 Issue
+              issue_body=$(jq -n \
+                --arg main "${{ env.MAIN_SHA }}" \
+                --arg table "${{ env.TABLE_SHA }}" \
+                --arg ts "${{ env.MAIN_TIMESTAMP }}" \
+                --argjson old "$existing_data" \
+                '$old + {
+                  TableRow_file_sha: $table,
+                  repo_sha: $main,
+                  timestamp: $ts
+                }')
+              
+              echo "=== 更新 Issue ==="
+              response=$(curl -fsS -X PATCH \
+                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Content-Type: application/json" \
+                -d "$(jq -n --argjson body "$issue_body" '{body: $body|tojson}')" \
+                "https://api.github.com/repos/${{ github.repository }}/issues/$issue_id")
+              
+              # 检查更新是否成功
+              if [ $? -eq 0 ]; then
+                echo "✅ Issue 更新成功"
+                # 打印更新后的 Issue 内容（仅 body 字段）
+                echo "=== 更新后的 Issue 内容 ==="
+                echo "$response" | jq -r '.body'  # 使用 -r 选项去除 JSON 字符串的引号
+                echo "==========================="
+              else
+                echo "❌ Issue 更新失败"
+                exit 1
+              fi
+            else
+              echo "⏸️ 无需更新 Issue：one-hub 仓库和 TableRow 均未更新"
+            fi
+            
+            # 设置输出变量
+            echo "main_updated=$main_updated" >> $GITHUB_OUTPUT
+            echo "table_updated=$table_updated" >> $GITHUB_OUTPUT
+            echo "is_first_run=false" >> $GITHUB_OUTPUT  # 标记为非首次运行
+          fi
+          echo "=== Issue 管理完成 ==="
+
+      # ========== 最终检查 ==========
+      - name: 构建决策
+        id: final_check
+        run: |
+          echo "=== 开始最终检查 ==="
+          if [[ "${{ steps.issue_manager.outputs.main_updated }}" == "true" ]]; then
+            echo "📦 需要执行构建"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "⏸️ 跳过构建"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+          echo "=== 最终检查完成 ==="
+
+      - name: 发送TableRow通知
+        if: steps.issue_manager.outputs.table_updated  == 'true'
+        uses: candies404/Multi-Channel-Notifier@latest
+        with:
+          title: "TableRow组件更新"
+          content: "检测到新版本，点击查看：[TableRow.jsx](https://github.com/MartialBE/one-hub/blob/main/web/src/views/Channel/component/TableRow.jsx)"
+          hitokoto: 'false'
+          wpush_key : ${{ secrets.WPUSH_KEY }}
+
+  build-deploy:
+    name: 构建部署
+    needs: check-updates
+    if: needs.check-updates.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
     env:
       TZ: Asia/Shanghai
     steps:
-      - name: 检查更新
-        id: check
-        run: |
-          LAST_COMMIT=$(curl -s "https://api.github.com/repos/MartialBE/one-hub/commits/main" | jq -r '.commit.committer.date')
-          COMMIT_TIME=$(date -d "$LAST_COMMIT" +%s)
-          NOW=$(date +%s)
-          DIFF=$((NOW - COMMIT_TIME))
-          
-          COMMIT_DATE=$(date -d "@$COMMIT_TIME" '+%Y-%m-%d %H:%M:%S')
-          CURRENT_DATE=$(date '+%Y-%m-%d %H:%M:%S')
-          HOURS=$((DIFF / 3600))
-          
-          echo "最新提交时间: $COMMIT_DATE"
-          echo "当前时间: $CURRENT_DATE"
-          echo "相差: ${HOURS} 小时"
-          
-          if [ $DIFF -le 86400 ]; then
-            echo "24小时内有更新"
-            echo "has_update=true" >> $GITHUB_OUTPUT
-          else
-            echo "24小时内没有更新"
-            echo "has_update=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: 发送通知
-        if: steps.check.outputs.has_update == 'false'
-        uses: candies404/Multi-Channel-Notifier@latest
-        with:
-          title: "One Hub 构建通知"
-          content: "24小时内没有检测到更新"
-          # 是否启用一言
-          hitokoto: 'false'
-          wpush_key : ${{ secrets.WPUSH_KEY }}
-
-      - name: one-hub 仓库未更新 执行退出
-        if: steps.check.outputs.has_update == 'false'
-        run: exit 1
-
-      - name: 检查 one-hub 仓库 TableRow.jsx 是否更新
-        id: check_file
-        run: |
-          # 获取文件最后更新时间
-          FILE_LAST_COMMIT=$(curl -s "https://api.github.com/repos/MartialBE/one-hub/commits?path=web/src/views/Channel/component/TableRow.jsx" | jq -r '.[0].commit.committer.date')
-          FILE_COMMIT_TIME=$(date -d "$FILE_LAST_COMMIT" +%s)
-          NOW=$(date +%s)
-          DIFF=$((NOW - FILE_COMMIT_TIME))
-          
-          FILE_COMMIT_DATE=$(date -d "@$FILE_COMMIT_TIME" '+%Y-%m-%d %H:%M:%S')
-          echo "文件最后更新时间: $FILE_COMMIT_DATE"
-          
-          if [ $DIFF -le 86400 ]; then
-            echo "文件在24小时内有更新"
-            echo "file_updated=true" >> $GITHUB_OUTPUT
-          else
-            echo "文件在24小时内没有更新"
-            echo "file_updated=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: 发送 TableRow.jsx 未更新通知
-        if: steps.check_file.outputs.file_updated == 'true'
-        uses: candies404/Multi-Channel-Notifier@latest
-        with:
-          title: "One-Hub TableRow.jsx 更新"
-          content: "请及时上传更新后的 TableRow.jsx 文件"
-          hitokoto: 'false'
-          wpush_key : ${{ secrets.WPUSH_KEY }}
-
-      # - name: 如果文件没有更新则退出
-      #   if: steps.check_file.outputs.file_updated == 'false'
-      #   run: exit 1
-
-      - name: 检出 MartialBE/one-hub 目标仓库
+      - name: 检出 MartialBE/one-hub
         uses: actions/checkout@v4
         with:
           repository: MartialBE/one-hub
-          path: ""  # 在根目录
+          path: ""
 
       - name: 检出源仓库
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
-          path: source-repo  # 检出源仓库到 source-repo 目录
+          path: source-repo
 
       - name: 保存版本信息
         run: |
+          echo "=== 保存版本信息 ==="
           HASH=$(git rev-parse --short=7 HEAD)
+          echo "当前提交哈希: $HASH"
           echo "dev-$HASH" > VERSION
-          cat VERSION
+          echo "版本文件内容: $(cat VERSION)"
 
       - name: 设置 Node.js
         uses: actions/setup-node@v4
@@ -114,47 +241,41 @@ jobs:
             web/node_modules
             ~/.cache/yarn
           key: ${{ runner.os }}-node-${{ hashFiles('web/yarn.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
 
-      - name: 构建前端，删除了官网按钮
+      - name: 构建前端
         env:
           CI: ""
         run: |
-          ls -la  # 查看当前目录
-          ls -la source-repo/  # 查看源仓库目录内容
+          echo "=== 开始构建前端 ==="
           export VERSION=$(cat VERSION)
+          echo "当前版本: $VERSION"
           cp source-repo/one-hub/TableRow.jsx web/src/views/Channel/component/TableRow.jsx
+          echo "TableRow.jsx 已替换"
           cd web
           yarn install
           VITE_APP_VERSION=$VERSION yarn run build
+          echo "前端构建完成"
 
       - name: 设置 Go
         uses: actions/setup-go@v5
         with:
           go-version: ">=1.18.0"
 
-      # - name: 缓存 Go 模块
-      #   uses: actions/cache@v4
-      #   with:
-      #     path: |
-      #       ~/go/pkg/mod
-      #       ~/.cache/go-build
-      #     key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-      #     restore-keys: |
-      #       ${{ runner.os }}-go-
-
       - name: 编译后端 (amd64)
         run: |
+          echo "=== 编译后端 (amd64) ==="
           go mod download
           go build -ldflags "-s -w -X 'one-api/common/config.Version=$(cat VERSION)' -extldflags '-static'" -o one-api-amd64
+          echo "amd64 编译完成"
 
       - name: 编译后端 (arm64)
         run: |
+          echo "=== 编译后端 (arm64) ==="
           sudo rm /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get update
           sudo apt-get install gcc-aarch64-linux-gnu
           CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -ldflags "-s -w -X 'one-api/common/config.Version=$(cat VERSION)' -extldflags '-static'" -o one-api-arm64
+          echo "arm64 编译完成"
 
       - name: 设置 QEMU
         uses: docker/setup-qemu-action@v3
