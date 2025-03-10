@@ -165,7 +165,7 @@ jobs:
             if [[ $(echo "$repo_info" | jq -r '.message') == "Not Found" ]]; then
                 echo "❌ 仓库不存在: ${repo}"
                 # 为不存在的仓库添加错误信息
-                error_content+="##### ❌ 仓库：${repo}\n\n"
+                error_content+="##### ❌ 仓库：[${repo}](https://github.com/${repo})\n\n"
                 error_content+="📝 **描述**：*仓库不存在*\n\n"
                 error_content+="⚠️ **错误**：未找到该仓库，请检查仓库名称是否正确\n\n"
                 error_content+="---\n\n"
@@ -247,7 +247,7 @@ jobs:
             fi
 
             # 构建仓库信息
-            repo_info_content="##### ${status_icon} 仓库：${repo}\n\n"
+            repo_info_content="##### ${status_icon} 仓库：[${repo}](https://github.com/${repo})\n\n"
             repo_info_content+="📝 **描述**：${description}\n\n"
             repo_info_content+="⏰ **更新时间**：$(date -d "$commit_date" '+%Y-%m-%d %H:%M:%S %Z')\n\n"
             repo_info_content+="📌 **提交信息**：${commit_msg}\n\n"
