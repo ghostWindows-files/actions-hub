@@ -26,12 +26,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           LABEL="commit-sha-storage"
-
           # 检查标签是否存在
           label_exists=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
                         -H "Accept: application/vnd.github.v3+json" \
                         "https://api.github.com/repos/${{ github.repository }}/labels/${LABEL}" | jq -r '.name // empty')
-
           if [ -z "$label_exists" ]; then
             echo "创建标签 ${LABEL}..."
             curl -s -X POST \
@@ -42,15 +40,12 @@ jobs:
           else
             echo "标签 ${LABEL} 已存在"
           fi
-
           # 查找带有该标签的Issue
           echo "查找带有 ${LABEL} 标签的Issue..."
           issues_response=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
                           -H "Accept: application/vnd.github.v3+json" \
                           "https://api.github.com/repos/${{ github.repository }}/issues?labels=${LABEL}&state=all")
-
           issue_number=$(echo "$issues_response" | jq -r '.[0].number // empty')
-
           if [ -z "$issue_number" ]; then
             echo "未找到存储Issue，创建新Issue..."
             create_response=$(curl -s -X POST \
@@ -67,9 +62,7 @@ jobs:
           else
             echo "找到现有Issue编号: $issue_number"
           fi
-
           echo "issue_number=$issue_number" >> $GITHUB_OUTPUT
-
       # 步骤2: 读取存储的SHA
       - name: 读取存储的SHA
         id: read-shas
@@ -104,11 +97,9 @@ jobs:
           else
             echo "⚠️ 存储内容为空，视为首次运行"
           fi
-
           echo "stored_shas<<EOF" >> $GITHUB_OUTPUT
           echo "$stored_shas" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-
       # 步骤3: 检查仓库更新状态
       - name: 检查仓库更新状态
         id: check-updates
@@ -130,13 +121,12 @@ jobs:
             is_first_run=true
             echo "首次运行，将检查24小时内的更新"
           fi
-
           # 初始化新的SHA存储内容
           new_shas=""
           
           # 将环境变量转换为数组并立即计算总数
           read -ra repos <<< "$REPOS"
-          declare -i total_repos=${#repos[@]}  # 使用 declare -i 声明为整数变量
+          declare -i total_repos=${#repos[@]}
           
           echo "解析到的仓库数量: $total_repos"
           echo "仓库列表:"
@@ -145,7 +135,6 @@ jobs:
           done
           
           echo "开始处理 $total_repos 个仓库..."
-
           # 创建变量分别存储不同状态的仓库信息
           updated_content=""
           not_updated_content=""
@@ -164,7 +153,6 @@ jobs:
             # 检查仓库是否存在
             if [[ $(echo "$repo_info" | jq -r '.message') == "Not Found" ]]; then
                 echo "❌ 仓库不存在: ${repo}"
-                # 为不存在的仓库添加错误信息
                 error_content+="##### ❌ 仓库：[${repo}](https://github.com/${repo})\n\n"
                 error_content+="📝 **描述**：*仓库不存在*\n\n"
                 error_content+="⚠️ **错误**：未找到该仓库，请检查仓库名称是否正确\n\n"
@@ -176,10 +164,32 @@ jobs:
             latest_commit=$(curl -s -H "Accept: application/vnd.github.v3+json" \
                            -H "Authorization: token ${GITHUB_TOKEN}" \
                            "https://api.github.com/repos/${repo}/commits?per_page=1")
+            
+            # 检查API响应是否包含错误信息
+            if [[ $(echo "$latest_commit" | jq -r 'type') == "object" ]] && [[ $(echo "$latest_commit" | jq -r '.message') ]]; then
+                if [[ $(echo "$latest_commit" | jq -r '.message') == "Git Repository is empty." ]]; then
+                    echo "⚠️ 仓库为空: ${repo}"
+                    error_content+="##### ⚡ 仓库：[${repo}](https://github.com/${repo})\n\n"
+                    error_content+="📝 **描述**：$(echo "$repo_info" | jq -r '.description // "暂无描述"')\n\n"
+                    error_content+="⚡ **状态**：这是一个空仓库\n\n"
+                    error_content+="---\n\n"
+                    if [ -z "$new_shas" ]; then
+                        new_shas="${repo}:empty"
+                    else
+                        new_shas="${new_shas}\n${repo}:empty"
+                    fi
+                    continue
+                else
+                    echo "❌ 获取提交信息出错: $(echo "$latest_commit" | jq -r '.message')"
+                    error_content+="##### ❌ 仓库：[${repo}](https://github.com/${repo})\n\n"
+                    error_content+="📝 **描述**：$(echo "$repo_info" | jq -r '.description // "暂无描述"')\n\n"
+                    error_content+="⚠️ **错误**：$(echo "$latest_commit" | jq -r '.message')\n\n"
+                    error_content+="---\n\n"
+                    continue
+                fi
+            fi
           
-          
-          
-            # 解析信息
+            # 解析commit信息
             current_sha=$(echo "$latest_commit" | jq -r '.[0].sha[0:7]')
             # 获取存储的短SHA
             stored_sha=$(echo "$STORED_SHAS" | grep -oP "${repo}:\K[a-f0-9]{7}" || echo '')
@@ -198,7 +208,6 @@ jobs:
             else
                 new_shas="${new_shas}\n${repo}:${current_sha}"
             fi
-
             current_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             current_timestamp=$(date -u -d "$current_time" +%s)
             commit_timestamp=$(date -u -d "$commit_date" +%s)
@@ -228,10 +237,8 @@ jobs:
                     status_icon="✅"
                 fi
             fi
-
             # 计算时间显示
             time_diff_seconds=$((current_timestamp - commit_timestamp))
-
             # 格式化时间显示
             if [ $time_diff_seconds -lt 60 ]; then
                 time_status="${time_diff_seconds}秒未更新"
@@ -245,7 +252,6 @@ jobs:
                 time_diff_days=$((time_diff_seconds / 86400))
                 time_status="${time_diff_days}天未更新"
             fi
-
             # 构建仓库信息
             repo_info_content="##### ${status_icon} 仓库：[${repo}](https://github.com/${repo})\n\n"
             repo_info_content+="📝 **描述**：${description}\n\n"
@@ -253,7 +259,6 @@ jobs:
             repo_info_content+="📌 **提交信息**：${commit_msg}\n\n"
             repo_info_content+="⏳ **状态**：${time_status}\n\n"
             repo_info_content+="---\n\n"
-
             # 根据更新状态添加到对应的内容中
             if [ "$status_icon" = "✅" ]; then
                 updated_content+="$repo_info_content"
@@ -261,38 +266,41 @@ jobs:
                 not_updated_content+="$repo_info_content"
             fi
           done
-
-          # 计算错误数量（使用 || true 确保即使没有匹配也不会失败）
+          # 计算错误数量
           error_count=$(echo -e "$error_content" | grep -c "##### ❌" || true)
+          empty_count=$(echo -e "$error_content" | grep -c "##### ⚡" || true)
           
-          # 构建统计信息（使用实际换行符）
+          # 构建统计信息
           stats=$'### 📊 统计信息\n'
           stats+=$'总仓库数：'${total_repos}$'\n'
           stats+=$'有更新：'${updated_repos:-0}$'\n'
-          if [ "${error_count:-0}" -gt 0 ]; then
-            stats+=$'无更新：'$((total_repos - ${updated_repos:-0} - error_count))$'\n'
-            stats+=$'错误：'${error_count}$''
+          if [ "${error_count:-0}" -gt 0 ] || [ "${empty_count:-0}" -gt 0 ]; then
+            stats+=$'无更新：'$((total_repos - ${updated_repos:-0} - error_count - empty_count))$'\n'
+            if [ "${empty_count:-0}" -gt 0 ]; then
+              stats+=$'空仓库：'${empty_count}$'\n'
+            fi
+            if [ "${error_count:-0}" -gt 0 ]; then
+              stats+=$'错误：'${error_count}$''
+            fi
           else
             stats+=$'无更新：'$((total_repos - ${updated_repos:-0}))$''
           fi
           stats+=$'\n\n---\n\n'
           
-          # 合并所有内容，只在有错误时添加错误内容
-          if [ "${error_count:-0}" -gt 0 ]; then
+          # 合并所有内容
+          if [ "${error_count:-0}" -gt 0 ] || [ "${empty_count:-0}" -gt 0 ]; then
             final_status="${stats}${error_content}${updated_content}${not_updated_content}"
           else
             final_status="${stats}${updated_content}${not_updated_content}"
           fi
-
           echo "所有仓库处理完成"
           echo "更新的仓库数: ${updated_repos:-0}"
-
           # 设置通知标题
-          if [ "${error_count:-0}" -gt 0 ]; then
+          if [ "${error_count:-0}" -gt 0 ] || [ "${empty_count:-0}" -gt 0 ]; then
             if [ "${has_updates:-false}" = true ]; then
-              title_status="⚠️ 仓库有 ${updated_repos:-0} 个更新，${error_count} 个错误"
+              title_status="🔔 仓库有 ${updated_repos:-0} 个更新，${error_count} 个错误，${empty_count} 个空仓库"
             else
-              title_status="⚠️ 无更新，但有 ${error_count} 个仓库出错"
+              title_status="❗ 无更新，但有 ${error_count} 个仓库出错，${empty_count} 个空仓库"
             fi
           else
             if [ "${has_updates:-false}" = true ]; then
@@ -301,17 +309,15 @@ jobs:
               title_status="😴 监控的仓库暂无更新"
             fi
           fi
-
           # 将结果保存到GitHub Actions输出变量
           {
             echo "has_updates=${has_updates:-false}"
             echo "check_results<<EOF"
-            echo -e "$final_status"  # 使用 echo -e 来解析转义字符
+            echo -e "$final_status"
             echo "EOF"
             echo "title_status=${title_status}"
             echo "new_shas=${new_shas}"
           } >> $GITHUB_OUTPUT
-
       # 步骤4: 更新存储的SHA
       - name: 更新存储的SHA
         if: success()
@@ -336,7 +342,6 @@ jobs:
             echo "❌ SHA信息更新失败"
             exit 1
           fi
-
       # 步骤5: 发送通知
       - name: 发送通知
         if: steps.check-updates.outputs.has_updates == 'true'
