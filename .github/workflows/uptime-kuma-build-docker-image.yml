@@ -35,7 +35,7 @@ jobs:
           EXPECTED_TAG="${COMMIT_DATE}-${SHORT_SHA}"
           
           echo "正在检查标签: $EXPECTED_TAG"
-          TAG_EXISTS=$(curl -sf "https://hub.docker.com/v2/repositories/${{ secrets.DOCKERHUB_USERNAME }}/uptime-kuma/tags/$EXPECTED_TAG/" | jq -r '.name')
+          TAG_EXISTS=$(curl -sf "https://hub.docker.com/v2/repositories/${{ secrets.DOCKERHUB_USERNAME }}/mirror/tags/$EXPECTED_TAG/" | jq -r '.name')
           
           if [ -z "$TAG_EXISTS" ]; then
             echo "抱歉，没有找到标签 $EXPECTED_TAG"
@@ -102,7 +102,7 @@ jobs:
 
       - name: 创建 Dockerfile
         run: |
-          cat <<EOF > uptime-kuma/Dockerfile
+          cat <<EOF > mirror/Dockerfile
           FROM node:20-alpine AS builder
           WORKDIR /app
           COPY package*.json ./
@@ -127,9 +127,9 @@ jobs:
       - name: 构建并上传镜像
         id: build_push
         env:
-          IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/uptime-kuma
+          IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/mirror
         run: |
-          cd uptime-kuma
+          cd mirror
           # 保持与检查阶段相同的7位短SHA
           SHORT_SHA=$(git rev-parse --short=7 HEAD)
           COMMIT_DATE=$(git log -1 --format=%cs)
@@ -167,7 +167,7 @@ jobs:
               **提交信息:** {2}
               **提交作者:** {3}
               **提交时间:** {4}
-              **镜像地址:** [点击查看](https://hub.docker.com/r/{5}/uptime-kuma/tags)',
+              **镜像地址:** [点击查看](https://hub.docker.com/r/{5}/mirror/tags)',
               env.BUILD_TIME,
               env.IMAGE_TAG, 
               needs.Check-Update.outputs.last_commit_msg,
